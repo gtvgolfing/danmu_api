@@ -1,5 +1,7 @@
+import { normalizeSpaces } from './common-util.js';
+
 // 弹幕时间偏移独立模块
-// 职责：解析偏移规则、匹配偏移量、应用偏移到弹幕
+// 职责：解析链接 @偏移 与偏移规则、匹配偏移量、应用偏移到弹幕
 
 // 来源→平台别名映射（source 名和 platform 名不一致时扩展匹配）
 const SOURCE_ALIASES = {
@@ -66,13 +68,13 @@ export function parseOffsetRules(env) {
       all = false;
     }
 
-    // 解析路径：剧名/季/集
-    const segments = pathPart.trim().split('/');
-    const anime = segments[0] || null;
+    // 解析路径：剧名/季/集（仅在 / 后跟季/集标记（S\d+ 或 E\d+）时分隔剧名与季集）
+    const seMatch = pathPart.match(/^(.*?)\/([SE]\d+)(?:\/([SE]\d+))?$/i);
+    const anime = seMatch ? seMatch[1].trim() : pathPart.trim();
     if (!anime) return null;
 
-    const season = segments[1] ? normalizeSegment(segments[1]) : null;
-    const episode = segments[2] ? normalizeSegment(segments[2]) : null;
+    const season = seMatch ? normalizeSegment(seMatch[2]) : null;
+    const episode = seMatch && seMatch[3] ? normalizeSegment(seMatch[3]) : null;
 
     return { anime, season, episode, sources, all, offset, usePercent };
   }).filter(Boolean);
@@ -128,8 +130,8 @@ export function resolveOffsetRule(rules, { anime, season, episode, source }) {
     let genericMatch = null;
 
     for (const rule of rules) {
-      // 匹配剧名
-      if (rule.anime !== anime) continue;
+      // 匹配剧名（归一化后比较，消除 / 等非白名单字符带来的格式差异）
+      if (normalizeSpaces(rule.anime) !== normalizeSpaces(anime)) continue;
 
       // 匹配路径级别
       if (level.matchEpisode) {
@@ -179,8 +181,37 @@ export function applyOffset(danmus, offsetSeconds, options = {}) {
 
   const usePercent = options?.usePercent === true;
   const videoDuration = Number(options?.videoDuration || 0);
-  const scaleRatio = usePercent && Number.isFinite(videoDuration) && videoDuration > 0
-    ? (videoDuration + offset) / videoDuration
+  const getDanmuTimeSeconds = (danmu) => {
+    if (!danmu || typeof danmu !== 'object') return null;
+
+    if (typeof danmu.p === 'string') {
+      const parts = danmu.p.split(',');
+      const time = parseFloat(parts[0]);
+      if (Number.isFinite(time)) return time;
+    }
+
+    if (danmu.t !== undefined && danmu.t !== null) {
+      const time = Number(danmu.t);
+      if (Number.isFinite(time)) return time;
+    }
+
+    if (danmu.progress !== undefined && danmu.progress !== null) {
+      const time = Number(danmu.progress);
+      if (Number.isFinite(time)) return time / 1000;
+    }
+
+    if (danmu.timepoint !== undefined && danmu.timepoint !== null) {
+      const time = Number(danmu.timepoint);
+      if (Number.isFinite(time)) return time;
+    }
+
+    return null;
+  };
+  const fallbackDuration = videoDuration > 0
+    ? videoDuration
+    : getDanmuTimeSeconds(danmus[danmus.length - 1]) || 0;
+  const scaleRatio = usePercent && Number.isFinite(fallbackDuration) && fallbackDuration > 0
+    ? (fallbackDuration + offset) / fallbackDuration
     : null;
 
   if (usePercent && scaleRatio === null) return danmus;
@@ -231,4 +262,22 @@ export function applyOffset(danmus, offsetSeconds, options = {}) {
 
     return updated;
   });
+}
+
+/**
+ * 从播放链接尾部解析 @偏移 后缀（@秒数 / @%百分比），返回剥离后的洁净链接与偏移参数
+ * @param {string} rawUrl 原始链接
+ * @returns {{cleanUrl: string, offset: number, percent: boolean}} 洁净链接、偏移秒数、是否百分比
+ */
+export function stripLinkOffset(rawUrl) {
+  const url = String(rawUrl ?? '');
+  const percentMatch = url.match(/@%(-?\d+(?:\.\d+)?)$/);
+  if (percentMatch) {
+    return { cleanUrl: url.substring(0, url.length - percentMatch[0].length), offset: parseFloat(percentMatch[1]), percent: true };
+  }
+  const offsetMatch = url.match(/@(-?\d+(?:\.\d+)?)$/);
+  if (offsetMatch) {
+    return { cleanUrl: url.substring(0, url.length - offsetMatch[0].length), offset: parseFloat(offsetMatch[1]), percent: false };
+  }
+  return { cleanUrl: url, offset: 0, percent: false };
 }
